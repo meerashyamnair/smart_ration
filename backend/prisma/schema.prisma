@@ -1,0 +1,353 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+enum Role {
+  BENEFICIARY
+  SHOPKEEPER
+  ADMIN
+}
+
+enum CardCategory {
+  BPL // Below Poverty Line
+  AAY // Antyodaya Anna Yojana
+  APL // Above Poverty Line
+}
+
+enum CardStatus {
+  ACTIVE
+  SUSPENDED
+  CANCELLED
+}
+
+enum MovementReason {
+  REPLENISHMENT
+  DISPENSING
+  ADJUSTMENT
+  RETURN
+}
+
+enum TxnStatus {
+  SUCCESS
+  CANCELLED
+  FAILED
+}
+
+enum VerificationMode {
+  QR_CODE
+  MANUAL_OVERRIDE
+  BIOMETRIC_FALLBACK
+}
+
+enum QueueStatus {
+  BOOKED
+  COMPLETED
+  CANCELLED
+  MISSED
+}
+
+enum ComplaintStatus {
+  SUBMITTED
+  UNDER_REVIEW
+  RESOLVED
+  REJECTED
+}
+
+// 1. User Account
+model User {
+  id                String             @id @default(uuid())
+  name              String
+  email             String             @unique
+  phone             String
+  passwordHash      String
+  role              Role               @default(BENEFICIARY)
+  status            String             @default("ACTIVE")
+  createdAt         DateTime           @default(now())
+  updatedAt         DateTime           @updatedAt
+
+  beneficiary       Beneficiary?
+  shopkeeperProfile ShopkeeperProfile?
+  resolvedComplaints Complaint[]        @relation("AdminResolver")
+  notifications     Notification[]
+  auditLogs         AuditLog[]
+
+  @@index([email])
+  @@index([role])
+}
+
+// 2. Beneficiary Profile
+model Beneficiary {
+  id           String              @id @default(uuid())
+  userId       String              @unique
+  user         User                @relation(fields: [userId], references: [id], onDelete: Cascade)
+  rationCardId String              @unique
+  rationCard   RationCard          @relation(fields: [rationCardId], references: [id], onDelete: Cascade)
+  createdAt    DateTime            @default(now())
+  updatedAt    DateTime            @updatedAt
+
+  transactions DistributionTransaction[]
+  queueBookings QueueBooking[]
+  complaints   Complaint[]
+
+  @@index([userId])
+  @@index([rationCardId])
+}
+
+// 3. Digital Ration Card
+model RationCard {
+  id                 String              @id @default(uuid())
+  rationCardNumber   String              @unique
+  qrToken            String              @unique
+  category           CardCategory        @default(BPL)
+  familyMembersCount Int                 @default(1)
+  incomeGroup        String?
+  address            String
+  status             CardStatus          @default(ACTIVE)
+  rationShopId       String
+  rationShop         RationShop          @relation(fields: [rationShopId], references: [id])
+  createdAt          DateTime            @default(now())
+  updatedAt          DateTime            @updatedAt
+
+  beneficiary        Beneficiary?
+
+  @@index([rationCardNumber])
+  @@index([qrToken])
+  @@index([rationShopId])
+}
+
+// 4. Ration Shop (Fair Price Shop)
+model RationShop {
+  id                String                 @id @default(uuid())
+  shopCode          String                 @unique
+  shopName          String
+  address           String
+  district          String
+  pincode           String
+  contactNumber     String
+  status            String                 @default("ACTIVE")
+  createdAt         DateTime               @default(now())
+  updatedAt         DateTime               @updatedAt
+
+  shopkeepers       ShopkeeperProfile[]
+  rationCards       RationCard[]
+  stocks            Stock[]
+  stockMovements    StockMovement[]
+  transactions      DistributionTransaction[]
+  queueBookings     QueueBooking[]
+  complaints        Complaint[]
+
+  @@index([shopCode])
+  @@index([district])
+}
+
+// 5. Shopkeeper Profile / Shop Assignment
+model ShopkeeperProfile {
+  id           String     @id @default(uuid())
+  userId       String     @unique
+  user         User       @relation(fields: [userId], references: [id], onDelete: Cascade)
+  rationShopId String
+  rationShop   RationShop @relation(fields: [rationShopId], references: [id], onDelete: Cascade)
+  assignedAt   DateTime   @default(now())
+
+  @@index([userId])
+  @@index([rationShopId])
+}
+
+// 6. Commodity / Ration Item
+model RationItem {
+  id                   String               @id @default(uuid())
+  itemCode             String               @unique
+  name                 String
+  unit                 String               // e.g. KG, LITER
+  standardPricePerUnit Float
+  status               String               @default("ACTIVE")
+  createdAt            DateTime             @default(now())
+  updatedAt            DateTime             @updatedAt
+
+  stocks               Stock[]
+  stockMovements       StockMovement[]
+  entitlements         RationEntitlement[]
+  distributionItems    DistributionItem[]
+
+  @@index([itemCode])
+}
+
+// 7. Configurable Entitlement Policy
+model RationEntitlement {
+  id                     String       @id @default(uuid())
+  category               CardCategory
+  rationItemId           String
+  rationItem             RationItem   @relation(fields: [rationItemId], references: [id], onDelete: Cascade)
+  quotaPerMember         Float        @default(0.00)
+  quotaFlatPerCard       Float        @default(0.00)
+  subsidizedPricePerUnit Float
+  effectiveMonthYear     String       // MM-YYYY e.g., 10-2026
+  createdAt              DateTime     @default(now())
+
+  @@unique([category, rationItemId, effectiveMonthYear])
+  @@index([category, effectiveMonthYear])
+}
+
+// 8. Shop Inventory Stock
+model Stock {
+  id                String     @id @default(uuid())
+  rationShopId      String
+  rationShop        RationShop @relation(fields: [rationShopId], references: [id], onDelete: Cascade)
+  rationItemId      String
+  rationItem        RationItem @relation(fields: [rationItemId], references: [id], onDelete: Cascade)
+  quantityAvailable Float      @default(0.000)
+  lastUpdated       DateTime   @updatedAt
+
+  @@unique([rationShopId, rationItemId])
+  @@index([rationShopId, rationItemId])
+}
+
+// 9. Stock Movement Log
+model StockMovement {
+  id              String         @id @default(uuid())
+  rationShopId    String
+  rationShop      RationShop     @relation(fields: [rationShopId], references: [id], onDelete: Cascade)
+  rationItemId    String
+  rationItem      RationItem     @relation(fields: [rationItemId], references: [id], onDelete: Cascade)
+  reason          MovementReason
+  quantityChange  Float
+  previousBalance Float
+  newBalance      Float
+  referenceId     String?        // Transaction ID or Replenishment Order ID
+  operatorId      String?        // User ID who performed action
+  timestamp       DateTime       @default(now())
+
+  @@index([rationShopId, timestamp])
+  @@index([referenceId])
+}
+
+// 10. Distribution Transaction
+model DistributionTransaction {
+  id               String            @id @default(uuid())
+  transactionRef   String            @unique
+  idempotencyKey   String?           @unique
+  beneficiaryId    String
+  beneficiary      Beneficiary       @relation(fields: [beneficiaryId], references: [id])
+  rationShopId     String
+  rationShop       RationShop        @relation(fields: [rationShopId], references: [id])
+  totalAmount      Float
+  verificationMode VerificationMode  @default(QR_CODE)
+  status           TxnStatus         @default(SUCCESS)
+  timestamp        DateTime          @default(now())
+
+  items            DistributionItem[]
+  receipt          DigitalReceipt?
+  complaints       Complaint[]
+
+  @@index([transactionRef])
+  @@index([beneficiaryId])
+  @@index([rationShopId])
+  @@index([timestamp])
+}
+
+// 11. Transaction Item Breakdown
+model DistributionItem {
+  id                     String                  @id @default(uuid())
+  transactionId          String
+  transaction            DistributionTransaction @relation(fields: [transactionId], references: [id], onDelete: Cascade)
+  rationItemId           String
+  rationItem             RationItem              @relation(fields: [rationItemId], references: [id])
+  quantityDispensed      Float
+  pricePerUnit           Float
+  totalPrice             Float
+
+  @@index([transactionId])
+}
+
+// 12. Digital Receipt
+model DigitalReceipt {
+  id             String                  @id @default(uuid())
+  receiptNumber  String                  @unique
+  transactionId  String                  @unique
+  transaction    DistributionTransaction @relation(fields: [transactionId], references: [id], onDelete: Cascade)
+  pdfUrl         String?
+  receiptPayload String                  // JSON string of snapshot receipt
+  issuedAt       DateTime                @default(now())
+
+  @@index([receiptNumber])
+}
+
+// 13. Queue Time-Slot Booking
+model QueueBooking {
+  id            String      @id @default(uuid())
+  bookingRef    String      @unique @default(uuid())
+  beneficiaryId String
+  beneficiary   Beneficiary @relation(fields: [beneficiaryId], references: [id])
+  rationShopId  String
+  rationShop    RationShop  @relation(fields: [rationShopId], references: [id])
+  bookingDate   String      // YYYY-MM-DD
+  timeSlot      String      // e.g. 09:00 - 10:00
+  tokenNumber   Int
+  status        QueueStatus @default(BOOKED)
+  createdAt     DateTime    @default(now())
+
+  @@index([rationShopId, bookingDate, timeSlot])
+  @@index([beneficiaryId])
+}
+
+// 14. Grievance & Complaint Ticket
+model Complaint {
+  id               String                   @id @default(uuid())
+  ticketId         String                   @unique
+  beneficiaryId    String
+  beneficiary      Beneficiary              @relation(fields: [beneficiaryId], references: [id])
+  rationShopId     String
+  rationShop       RationShop               @relation(fields: [rationShopId], references: [id])
+  transactionId    String?
+  transaction      DistributionTransaction? @relation(fields: [transactionId], references: [id])
+  category         String
+  subject          String
+  description      String
+  status           ComplaintStatus          @default(SUBMITTED)
+  adminResponse    String?
+  resolvedByUserId String?
+  resolver         User?                    @relation("AdminResolver", fields: [resolvedByUserId], references: [id])
+  resolvedAt       DateTime?
+  createdAt        DateTime                 @default(now())
+  updatedAt        DateTime                 @updatedAt
+
+  @@index([ticketId])
+  @@index([beneficiaryId])
+  @@index([status])
+}
+
+// 15. Notification
+model Notification {
+  id        String   @id @default(uuid())
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  title     String
+  message   String
+  type      String   @default("INFO")
+  isRead    Boolean  @default(false)
+  createdAt DateTime @default(now())
+
+  @@index([userId, isRead])
+}
+
+// 16. Security & Operational Audit Log
+model AuditLog {
+  id             String   @id @default(uuid())
+  userId         String?
+  user           User?    @relation(fields: [userId], references: [id])
+  action         String
+  entityAffected String
+  entityId       String?
+  detailsJson    String?
+  ipAddress      String?
+  timestamp      DateTime @default(now())
+
+  @@index([userId])
+  @@index([action])
+  @@index([timestamp])
+}
